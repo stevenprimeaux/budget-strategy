@@ -1,0 +1,442 @@
+---
+title: "Coordinator Performance Task"
+output-file: "2024-07-26-Steven-Primeaux-Performance Task"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    toc: true
+  docx: default
+execute: 
+  message: false
+  warning: false
+---
+
+## Introduction
+
+This data notebook contains all of the code needed for the calculations and 
+visualizations, as well as the text of the email. Section 1, Project Setup, 
+contains some introductory code chunks needed for the analysis, while Section 2,
+Email, contains the text of the email itself, including visualizations.
+
+## Section 1: Project Setup
+
+Load package dependencies.
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(janitor)
+library(scales)
+library(knitr)
+```
+
+Create utility variables for plotting, including:
+
+* The number of full months assumed to have already elapsed this fiscal year.
+* An array of months for time-series axes.
+* An array of keys to indicate solid or dashed lines (actual versus projected).
+
+```{r}
+n_months_elapsed <- 7
+
+months_vector <- seq.Date(
+  as_date("2023-10-01"), as_date("2024-09-01"),
+  by = "month"
+)
+
+linetypes_vector <- factor(c(1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2))
+```
+
+Read in raw data.
+
+```{r}
+data_raw <-
+  read_excel("data.xlsx", range = "A18:AD6740") |>
+  clean_names()
+```
+
+Create new fields for analysis.
+
+```{r}
+data <-
+  data_raw |>
+  mutate(budgeted = round(total_budget, 0)) |>
+  mutate(committed = round(expenditure + obligation + commitment, 0)) |>
+  mutate(available = round(available_budget, 0)) |>
+  mutate(
+    budgeted_month    = round(budgeted / 12, 0),
+    committed_month   = round(committed / n_months_elapsed, 0),
+    budgeted_current  = budgeted_month * n_months_elapsed,
+    committed_current = committed_month * n_months_elapsed,
+    variance_abs      = committed_current - budgeted_current,
+    variance_prop     = variance_abs / budgeted_current,
+    available_current = budgeted_current - committed_current
+  ) |>
+  mutate(across(c(cost_center), as.character)) |>
+  rename(
+    account_3 = account_category_description_parent_level_3,
+    account_1 = account_group_parent_level_1_description,
+    account_0 = account_description
+  )
+```
+
+## Section 2: Email
+
+Dear Ms. Smith:
+
+Thanks so much for your email. I'll be happy to answer those questions, and I've
+also included some charts that I found helpful in thinking about these questions
+myself.
+
+### Are we on track for this point of the school year?
+
+```{r}
+accounts_3_cum <-
+  data |>
+  group_by(account_3) |>
+  summarize(
+    budgeted_month = sum(budgeted_month),
+    committed_month = sum(committed_month)
+  ) |>
+  mutate(n = 12) |>
+  uncount(n) |>
+  group_by(account_3) |>
+  mutate(
+    Budgeted  = cumsum(budgeted_month),
+    Committed = cumsum(committed_month)
+  ) |>
+  mutate(month_fiscal = months_vector, linetype = linetypes_vector) |>
+  select(account_3, month_fiscal, Budgeted, Committed, linetype) |>
+  pivot_longer(
+    cols = c(Budgeted, Committed), names_to = "var", values_to = "val"
+  )
+```
+
+```{r}
+data |>
+  group_by(account_3) |>
+  summarize(
+    budgeted = sum(budgeted),
+    committed = sum(committed),
+    budgeted_current = sum(budgeted_current),
+    committed_current = sum(committed_current)
+  ) |>
+  mutate(
+    variance_abs = committed_current - budgeted_current,
+    variance_prop = variance_abs / budgeted_current
+  ) |>
+  mutate(across(account_3, \(x) str_remove(x, " SERVICES"))) |>
+  arrange(desc(budgeted)) |>
+  ungroup() |>
+  kable()
+```
+
+#### Personnel
+
+```{r}
+personnel <-
+  accounts_3_cum |>
+  filter(account_3 == "PERSONNEL SERVICES")
+
+personnel |>
+  ggplot(aes(month_fiscal, val, color = var)) +
+  geom_line(aes(linetype = linetype)) +
+  geom_line(
+    data = filter(personnel, month_fiscal <= "2024-04-01"), linetype = 1
+  ) +
+  scale_y_continuous(labels = label_currency(scale_cut = cut_long_scale())) +
+  scale_linetype(guide = NULL) +
+  ggtitle("Personnel Services") +
+  xlab("Month") +
+  ylab("Amount") +
+  labs(color = NULL)
+```
+
+Starting with our personnel budget of $1.186 billion, through the first seven 
+months of the fiscal year (through April), we'd expect to have committed around 
+\$692 million by this point. At \$590 million, we're around $101 million under 
+budget, or 15 percent.
+
+#### Non-Personnel
+
+```{r}
+nonpersonnel <-
+  accounts_3_cum |>
+  filter(account_3 == "NON-PERSONNEL SERVICES")
+
+nonpersonnel |>
+  ggplot(aes(month_fiscal, val, color = var)) +
+  geom_line(aes(linetype = linetype)) +
+  geom_line(
+    data = filter(nonpersonnel, month_fiscal <= "2024-04-01"), linetype = 1
+  ) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_long_scale())) +
+  scale_linetype(guide = NULL) +
+  ggtitle("Non-Personnel Services") +
+  xlab("Month") +
+  ylab("Amount") +
+  labs(color = NULL)
+```
+
+Looking now at our non-personnel budget of $244 million, through the first seven 
+months of the fiscal year (through April), we'd expect to have committed around 
+\$142 million by this point. At \$123 million actual, we're around $19 million 
+under budget, or 13 percent.
+
+### Are there any budget concerns? Where are we over-spending?
+
+#### Accounts
+
+```{r}
+accounts_0 <-
+  data |>
+  group_by(account_3, account_0) |>
+  summarize(
+    budgeted_current = sum(budgeted_current),
+    committed_current = sum(committed_current)
+  ) |>
+  mutate(
+    variance_abs = committed_current - budgeted_current,
+    variance_prop = variance_abs / budgeted_current
+  ) |>
+  arrange(desc(account_3), desc(budgeted_current)) |>
+  ungroup()
+```
+
+```{r}
+accounts_0 |>
+  filter(variance_prop > 0) |>
+  ggplot(aes(variance_prop, fct_reorder(account_0, variance_prop))) +
+  geom_col() +
+  scale_x_continuous(labels = label_percent()) +
+  ggtitle("Budget Variance - Percent", "Accounts") +
+  xlab("Percent") +
+  ylab("Category")
+```
+
+Looking first at the account level, as a percent of budgeted amount, auto 
+maintenance and repairs, security services, and IT software maintenance appear 
+to be most over budget for this point in the year.
+
+```{r}
+accounts_0 |>
+  filter(variance_abs > 0) |>
+  ggplot(aes(variance_abs, fct_reorder(account_0, variance_abs))) +
+  geom_col() +
+  scale_x_continuous(labels = label_currency(scale_cut = cut_long_scale())) +
+  ggtitle("Budget Variance - Dollars", "Accounts") +
+  xlab("Dollars") +
+  ylab("Category")
+```
+
+By absolute dollar value, land and structure rentals, gas, and security 
+services appear to be most over budget.
+
+#### Cost Centers
+
+```{r}
+costcenters <-
+  data |>
+  group_by(account_3, cost_center) |>
+  summarize(
+    budgeted_current = sum(budgeted_current),
+    committed_current = sum(committed_current)
+  ) |>
+  mutate(
+    variance_abs = committed_current - budgeted_current,
+    variance_prop = variance_abs / budgeted_current
+  ) |>
+  arrange(desc(account_3), desc(budgeted_current)) |>
+  ungroup()
+```
+
+```{r}
+costcenters |>
+  filter(variance_prop > 0) |>
+  ggplot(aes(variance_prop, fct_reorder(cost_center, variance_prop))) +
+  geom_col() +
+  scale_x_continuous(labels = label_percent()) +
+  ggtitle("Budget Variance - Percent", "Cost Centers") +
+  xlab("Percent") +
+  ylab("Category")
+```
+
+Looking now at the cost center level, as a percent of budgeted amount, 40122, 
+40036, and 40048 appear to be most over budget for this point in the year.
+
+```{r}
+costcenters |>
+  filter(variance_abs > 0) |>
+  ggplot(aes(variance_abs, fct_reorder(cost_center, variance_abs))) +
+  geom_col() +
+  scale_x_continuous(labels = label_currency(scale_cut = cut_long_scale())) +
+  ggtitle("Budget Variance - Dollars", "Cost Centers") +
+  xlab("Dollars") +
+  ylab("Category")
+```
+
+By absolute dollar value, 40122 and 40076 are currently over by more than 
+\$75,000, with 40036 additionally being over budget by more than \$50,000.
+
+### Are there any risks of underspending over $100,000 for any cost center or account?
+
+Note that responses in this section are focusing on non-personnel expenses, 
+which may be more relevant for the June 7 procurement deadline.
+
+#### Accounts
+
+```{r}
+#| eval: false
+
+accounts_0 |>
+  filter(account_3 == "NON-PERSONNEL SERVICES") |>
+  filter(variance_abs < -100000) |>
+  arrange(variance_abs)
+```
+
+At the account level, 25 accounts are potentially underspending at this point in
+the year by more than $100,000. 
+
+```{r}
+accounts_0 |>
+  filter(account_3 == "NON-PERSONNEL SERVICES") |>
+  filter(variance_abs < -100000) |>
+  ggplot(
+    aes(variance_abs, fct_reorder(account_0, variance_abs, .desc = TRUE))
+  ) +
+  geom_col() +
+  scale_x_continuous(labels = label_currency(scale_cut = cut_long_scale())) +
+  ggtitle("Largest Potential Underspend") +
+  xlab("Dollars") +
+  ylab("Category")
+```
+
+For the account level, at this point in the year professional service fees and 
+contracting are potentially underspending by more than $4 million, while three 
+more accounts are potentially underspending by more than $1 million.
+
+#### Cost Centers
+
+```{r}
+#| eval: false
+
+costcenters |>
+  filter(account_3 == "NON-PERSONNEL SERVICES") |>
+  filter(variance_abs < -100000) |>
+  arrange(variance_abs) |>
+  kable()
+```
+
+At this point in the year, 63 cost centers are potentially underspending by more
+then $100,000.
+
+```{r}
+costcenters |>
+  filter(account_3 == "NON-PERSONNEL SERVICES") |>
+  filter(variance_abs < -100000) |>
+  slice_min(order_by = variance_abs, n = 10) |>
+  ggplot(
+    aes(variance_abs, fct_reorder(cost_center, variance_abs, .desc = TRUE))
+  ) +
+  geom_col() +
+  scale_x_continuous(labels = label_currency(scale_cut = cut_long_scale())) +
+  ggtitle("Largest Potential Underspend") +
+  xlab("Dollars") +
+  ylab("Category")
+```
+
+At this point in the year, cost centers 40086 and 40078 were both potentially 
+underspending by more than $1 million.
+
+### Immediate Pressures
+
+#### Chromebooks
+
+```{r}
+data |>
+  filter(account_0 == "IT HARDWARE ACQUISITIONS") |>
+  group_by(fund, account, fund_description, account_0) |>
+  summarize(
+    budgeted = sum(budgeted),
+    committed = sum(committed),
+    available = sum(available)
+  ) |>
+  arrange(desc(available)) |>
+  kable()
+```
+
+If we look at the full-year budgeted amount for IT hardware acquisitions, 
+$250,000 for the Chromebooks would potentially be available under local funds, 
+Medicaid Public Provider Recovery Grant, and At-Risk Concentration individually.
+
+```{r}
+data |>
+  filter(account_0 == "IT HARDWARE ACQUISITIONS") |>
+  group_by(fund, account, fund_description, account_0) |>
+  summarize(
+    budgeted_current = sum(budgeted_current),
+    committed_current = sum(committed_current),
+    available_current = sum(available_current)
+  ) |>
+  arrange(desc(available_current)) |>
+  kable()
+```
+
+However, if we instead calculate a year-to-date budgeted amount (assuming seven 
+months have elapsed in the fiscal year), the full $250,000 would only be 
+available under local funds, although part of the amount could still be moved 
+from Medicaid Public Provider Recovery Grant and At-Risk Concentration.
+
+Another consideration is that At-Risk Concentration and Medicaid funds could be 
+restricted, so in this case local funds probably make more sense.
+
+In conclusion, budget code GAO-1010-1010001-7171008 would be my recommendation.
+
+#### Field Trip
+
+```{r}
+data |>
+  filter(account_0 %in% c("PROF SERVICE FEES & CONTR", "TRAVEL - LOCAL")) |>
+  filter(appropriated_fund_description == "LOCAL FUND") |>
+  filter(fund_description != "AT-RISK CONCENTRATION") |>
+  group_by(fund, account, fund_description, account_0) |>
+  summarize(
+    budgeted_current = sum(budgeted_current),
+    committed_current = sum(committed_current),
+    available_current = sum(available_current)
+  ) |>
+  arrange(desc(available_current)) |>
+  kable()
+```
+
+After filtering for the professional services and local travel accounts, then 
+restricting our search to local fund appropriations and excluding At-Risk 
+Concentration funds, it does appear that we can shift some resources for the 
+field trip costs.
+
+For the $8,000 needed for local buses, I would recommend budget code 
+GAO-1010-1010001-7131002, and for the $28,324 needed under professional services
+I would recommend budget code GAO-1010-1010001-7131009.
+
+```{r}
+write_xlsx(
+  list(
+    "Data" = data,
+    "Top Level Monthly" = accounts_3_cum,
+    "Accounts YTD" = accounts_0,
+    "Cost Centers YTD" = costcenters
+  ),
+  path = "2024-07-26-Steven-Primeaux-Performance Task.xlsx"
+)
+```
+
+I've attached my working files for reference. Please let me know if you have any
+other questions, I'll be happy to assist.
+
+--Steven
+
+```{r}
+Sys.time()
+```
